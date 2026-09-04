@@ -1,0 +1,486 @@
+
+
+/* Подключаем библиотеку HCPCA9685 для управления сервоприводами через PCA9685 */
+#include "HCPCA9685.h"
+
+/* Адрес устройства на шине I2C. Для модуля HCMODU0097 адрес по умолчанию 0x40 */
+#define I2CAdd 0x40
+
+/* Создаем экземпляр библиотеки для работы с PCA9685 */
+HCPCA9685 HCPCA9685(I2CAdd);
+
+// ============================================================================
+// НАЧАЛЬНЫЕ ПОЗИЦИИ (PARKING POSITIONS) СЕРВОМОТОРОВ
+// ============================================================================
+// Эти значения определяют начальное положение каждого сервопривода при запуске
+const int servo_joint_L_parking_pos = 60;   // Левый сервопривод локтя (канал 0)
+const int servo_joint_R_parking_pos = 60;   // Правый сервопривод локтя (канал 1)
+const int servo_joint_1_parking_pos = 70;   // Серво плеча (канал 2)
+const int servo_joint_2_parking_pos = 47;   // Серво запястья 1 (канал 3)
+const int servo_joint_3_parking_pos = 63;   // Серво запястья 2 (вращение) (канал 4)
+const int servo_joint_4_parking_pos = 63;   // Серво захвата (канал 5)
+
+// ============================================================================
+// ШАГ ИЗМЕНЕНИЯ ПОЗИЦИЙ (ЧУВСТВИТЕЛЬНОСТЬ)
+// ============================================================================
+// Эти значения определяют, насколько сильно изменяется позиция сервопривода
+// при каждом нажатии кнопки управления
+int servo_joint_L_pos_increment = 20;   // Шаг для левого локтя
+int servo_joint_R_pos_increment = 20;   // Шаг для правого локтя
+int servo_joint_1_pos_increment = 20;   // Шаг для плеча
+int servo_joint_2_pos_increment = 50;   // Шаг для запястья 1
+int servo_joint_3_pos_increment = 60;   // Шаг для запястья 2 (вращение)
+int servo_joint_4_pos_increment = 40;   // Шаг для захвата
+
+// ============================================================================
+// ТЕКУЩИЕ ПОЗИЦИИ СЕРВОПРИВОДОВ
+// ============================================================================
+// Эти переменные хранят текущее положение каждого сервопривода во время работы
+int servo_joint_L_parking_pos_i = servo_joint_L_parking_pos;
+int servo_joint_R_parking_pos_i = servo_joint_R_parking_pos;
+int servo_joint_1_parking_pos_i = servo_joint_1_parking_pos;
+int servo_joint_2_parking_pos_i = servo_joint_2_parking_pos;
+int servo_joint_3_parking_pos_i = servo_joint_3_parking_pos;
+int servo_joint_4_parking_pos_i = servo_joint_4_parking_pos;
+
+// ============================================================================
+// ПРЕДЕЛЬНЫЕ ПОЗИЦИИ СЕРВОПРИВОДОВ (МИНИМУМ И МАКСИМУМ)
+// ============================================================================
+// Для безопасности механических частей задаем пределы движения каждого серво
+int servo_joint_L_min_pos = 10;     // Минимальный угол для левого локтя
+int servo_joint_L_max_pos = 180;    // Максимальный угол для левого локтя
+
+int servo_joint_R_min_pos = 10;     // Минимальный угол для правого локтя
+int servo_joint_R_max_pos = 180;    // Максимальный угол для правого локтя
+
+int servo_joint_1_min_pos = 10;     // Минимальный угол для плеча
+int servo_joint_1_max_pos = 400;    // Максимальный угол для плеча
+
+int servo_joint_2_min_pos = 10;     // Минимальный угол для запястья 1
+int servo_joint_2_max_pos = 380;    // Максимальный угол для запястья 1
+
+int servo_joint_3_min_pos = 10;     // Минимальный угол для запястья 2 (вращение)
+int servo_joint_3_max_pos = 380;    // Максимальный угол для запястья 2
+
+int servo_joint_4_min_pos = 10;     // Минимальный угол для захвата (закрыт)
+int servo_joint_4_max_pos = 120;    // Максимальный угол для захвата (открыт)
+
+// ============================================================================
+// ВСПОМОГАТЕЛЬНЫЕ ПЕРЕМЕННЫЕ
+// ============================================================================
+// Переменные для временного хранения позиций (в текущей версии не используются)
+int servo_L_pos = 0;
+int servo_R_pos = 0;
+int servo_joint_1_pos = 0;
+int servo_joint_2_pos = 0;
+int servo_joint_3_pos = 0;
+int servo_joint_4_pos = 0;
+
+// Основная переменная для приема команд от Bluetooth
+char state = 0; // Принимает команды из последовательного порта
+
+// Параметры временных задержек для разных операций
+int response_time = 5;        // Базовая задержка для сервоприводов (мс)
+int response_time_4 = 2;      // Специальная задержка для запястья 2
+int loop_check = 0;           // Флаг для проверки выполнения демо-циклов
+int response_time_fast = 20;  // Быстрая задержка для демо-анимаций
+int action_delay = 600;       // Задержка между демо-действиями (мс)
+
+// ============================================================================
+// ПАРАМЕТРЫ ШАГОВОГО ДВИГАТЕЛЯ (ДЛЯ ВРАЩЕНИЯ ОСНОВАНИЯ)
+// ============================================================================
+// Определяем пины и параметры для управления шаговым двигателем
+const int dirPin = 4;            // Пин направления (DIR)
+const int stepPin = 5;           // Пин шага (STEP)
+const int stepsPerRevolution = 120;     // Количество шагов на оборот
+int stepDelay = 4500;            // Задержка между шагами (мкс)
+const int stepsPerRevolutionSmall = 60; // Для малых перемещений
+int stepDelaySmall = 9500;       // Задержка для малых перемещений (мкс)
+
+// ============================================================================
+// ФУНКЦИЯ НАСТРОЙКИ (SETUP) - ВЫПОЛНЯЕТСЯ ОДИН РАЗ ПРИ СТАРТЕ
+// ============================================================================
+void setup()
+{
+  // Настраиваем пины для шагового двигателя как выходы
+  pinMode(stepPin, OUTPUT);
+  pinMode(dirPin, OUTPUT);
+
+  /* Инициализируем библиотеку PCA9685 в режиме управления сервоприводами */
+  HCPCA9685.Init(SERVO_MODE);
+
+  /* "Пробуждаем" модуль PCA9685 (выход из спящего режима) */
+  HCPCA9685.Sleep(false);
+
+  // Инициализируем последовательную связь с Bluetooth модулем
+  // Скорость 4800 бод соответствует настройкам HC-05/06 модулей
+  Serial.begin(4800);
+
+  // Пауза 3 секунды для стабилизации системы
+  delay(3000);
+  
+  // Раскомментируйте нужные демонстрационные функции при необходимости:
+  // wakeUp();    // Демо 1: Анимация "пробуждения" робота
+  // flexMotors(); // Демо 2: Демонстрация движений всех суставов
+}
+
+// ============================================================================
+// ОСНОВНОЙ ЦИКЛ (LOOP) - ВЫПОЛНЯЕТСЯ ПОСТОЯННО
+// ============================================================================
+void loop() {
+  // Проверяем, есть ли данные для чтения из Bluetooth модуля
+  if (Serial.available() > 0) {
+    // Читаем один символ (команду) из последовательного порта
+    state = Serial.read();
+    
+    // Отправляем команду обратно для отладки (эхо)
+    Serial.print(state);
+
+    // ========================================================================
+    // ОБРАБОТКА КОМАНД УПРАВЛЕНИЯ
+    // Каждая буква соответствует определенному действию
+    // ========================================================================
+    
+    // Команды для вращения основания (шаговый двигатель)
+    if (state == 'S') {  // Вращение основания влево
+      baseRotateLeft();
+      delay(response_time);
+    }
+    
+    if (state == 'O') {  // Вращение основания вправо
+      baseRotateRight();
+      delay(response_time);
+    }
+
+    // Команды для управления плечевым суставом
+    if (state == 'c') {  // Опускание плеча (вперед)
+      shoulderServoForward();
+      delay(response_time);
+    }
+    
+    if (state == 'C') {  // Поднимание плеча (назад)
+      shoulderServoBackward();
+      delay(response_time);
+    }
+
+    // Команды для управления локтевым суставом
+    if (state == 'p') {  // Опускание локтя (вперед)
+      elbowServoForward();
+      delay(response_time);
+    }
+    
+    if (state == 'P') {  // Поднимание локтя (назад)
+      elbowServoBackward();
+      delay(response_time);
+    }
+
+    // Команды для управления запястьем 1 (наклон вверх/вниз)
+    if (state == 'U') {  // Поднятие запястья 1 вверх
+      wristServo1Backward();
+      delay(response_time);
+    }
+    
+    if (state == 'G') {  // Опускание запястья 1 вниз
+      wristServo1Forward();
+      delay(response_time);
+    }
+
+    // Команды для управления запястьем 2 (вращение)
+    if (state == 'R') {  // Вращение запястья 2 по часовой стрелке
+      wristServoCW();
+      delay(response_time);
+    }
+    
+    if (state == 'L') {  // Вращение запястья 2 против часовой стрелки
+      wristServoCCW();
+      delay(response_time);
+    }
+
+    // Команды для управления захватом (клешней)
+    if (state == 'F') {  // Открытие захвата
+      gripperServoBackward();
+      delay(response_time);
+    }
+    
+    if (state == 'f') {  // Закрытие захвата
+      gripperServoForward();
+      delay(response_time);
+    }
+  }
+}
+
+// ============================================================================
+// ФУНКЦИИ УПРАВЛЕНИЯ СЕРВОПРИВОДАМИ
+// Каждая функция отвечает за движение определенного сустава
+// ============================================================================
+
+// ФУНКЦИЯ: gripperServoForward - ЗАКРЫТИЕ ЗАХВАТА
+void gripperServoForward() {
+  // Проверяем, не достигли ли минимального положения (захват закрыт)
+  if (servo_joint_4_parking_pos_i > servo_joint_4_min_pos) {
+    // Устанавливаем позицию сервопривода захвата (канал 5)
+    HCPCA9685.Servo(5, servo_joint_4_parking_pos_i);
+    
+    // Задержка для плавности движения
+    delay(response_time);
+    
+    // Отправляем текущую позицию для отладки
+    Serial.println(servo_joint_4_parking_pos_i);
+    
+    // Уменьшаем позицию - захват закрывается
+    servo_joint_4_parking_pos_i = servo_joint_4_parking_pos_i - servo_joint_4_pos_increment;
+  }
+}
+
+// ФУНКЦИЯ: gripperServoBackward - ОТКРЫТИЕ ЗАХВАТА
+void gripperServoBackward() {
+  // Проверяем, не достигли ли максимального положения (захват открыт)
+  if (servo_joint_4_parking_pos_i < servo_joint_4_max_pos) {
+    // Устанавливаем позицию сервопривода захвата
+    HCPCA9685.Servo(5, servo_joint_4_parking_pos_i);
+    delay(response_time);
+    Serial.println(servo_joint_4_parking_pos_i);
+    
+    // Увеличиваем позицию - захват открывается
+    servo_joint_4_parking_pos_i = servo_joint_4_parking_pos_i + servo_joint_4_pos_increment;
+  }
+}
+
+// ФУНКЦИЯ: wristServoCW - ВРАЩЕНИЕ ЗАПЯСТЬЯ 2 ПО ЧАСОВОЙ СТРЕЛКЕ
+void wristServoCW() {
+  // Проверяем пределы вращения
+  if (servo_joint_3_parking_pos_i > servo_joint_3_min_pos) {
+    // Управляем сервоприводом запястья 2 (канал 4)
+    HCPCA9685.Servo(4, servo_joint_3_parking_pos_i);
+    
+    // Используем специальную задержку для этого сервопривода
+    delay(response_time_4);
+    Serial.println(servo_joint_3_parking_pos_i);
+    
+    // Уменьшаем позицию - вращение по часовой стрелке
+    servo_joint_3_parking_pos_i = servo_joint_3_parking_pos_i - servo_joint_3_pos_increment;
+  }
+}
+
+// ФУНКЦИЯ: wristServoCCW - ВРАЩЕНИЕ ЗАПЯСТЬЯ 2 ПРОТИВ ЧАСОВОЙ СТРЕЛКИ
+void wristServoCCW() {
+  // Проверяем пределы вращения
+  if (servo_joint_3_parking_pos_i < servo_joint_3_max_pos) {
+    HCPCA9685.Servo(4, servo_joint_3_parking_pos_i);
+    delay(response_time_4);
+    Serial.println(servo_joint_3_parking_pos_i);
+    
+    // Увеличиваем позицию - вращение против часовой стрелки
+    servo_joint_3_parking_pos_i = servo_joint_3_parking_pos_i + servo_joint_3_pos_increment;
+  }
+}
+
+// ФУНКЦИЯ: wristServo1Forward - ОПУСКАНИЕ ЗАПЯСТЬЯ 1 (ВНИЗ)
+void wristServo1Forward() {
+  if (servo_joint_2_parking_pos_i < servo_joint_2_max_pos) {
+    // Управляем сервоприводом запястья 1 (канал 3)
+    HCPCA9685.Servo(3, servo_joint_2_parking_pos_i);
+    delay(response_time);
+    Serial.println(servo_joint_2_parking_pos_i);
+    
+    // Увеличиваем позицию - запястье опускается вниз
+    servo_joint_2_parking_pos_i = servo_joint_2_parking_pos_i + servo_joint_2_pos_increment;
+  }
+}
+
+// ФУНКЦИЯ: wristServo1Backward - ПОДНИМАНИЕ ЗАПЯСТЬЯ 1 (ВВЕРХ)
+void wristServo1Backward() {
+  if (servo_joint_2_parking_pos_i > servo_joint_2_min_pos) {
+    HCPCA9685.Servo(3, servo_joint_2_parking_pos_i);
+    delay(response_time);
+    Serial.println(servo_joint_2_parking_pos_i);
+    
+    // Уменьшаем позицию - запястье поднимается вверх
+    servo_joint_2_parking_pos_i = servo_joint_2_parking_pos_i - servo_joint_2_pos_increment;
+  }
+}
+
+// ФУНКЦИЯ: elbowServoForward - ОПУСКАНИЕ ЛОКТЯ (ВПЕРЕД)
+// Важно: локтевой сустав использует два сервопривода (0 и 1) для синхронного движения
+void elbowServoForward() {
+  if (servo_joint_L_parking_pos_i < servo_joint_L_max_pos) {
+    // Левый сервопривод локтя (канал 0) движется вперед
+    HCPCA9685.Servo(0, servo_joint_L_parking_pos_i);
+    
+    // Правый сервопривод локтя (канал 1) движется в противоположном направлении
+    // Это создает синхронное движение локтевого сустава
+    HCPCA9685.Servo(1, (servo_joint_L_max_pos - servo_joint_L_parking_pos_i));
+    
+    delay(response_time);
+    Serial.println(servo_joint_L_parking_pos_i);
+    
+    // Обновляем позиции обоих сервоприводов
+    servo_joint_L_parking_pos_i = servo_joint_L_parking_pos_i + servo_joint_L_pos_increment;
+    servo_joint_R_parking_pos_i = servo_joint_L_max_pos - servo_joint_L_parking_pos_i;
+  }
+}
+
+// ФУНКЦИЯ: elbowServoBackward - ПОДНИМАНИЕ ЛОКТЯ (НАЗАД)
+void elbowServoBackward() {
+  if (servo_joint_L_parking_pos_i > servo_joint_L_min_pos) {
+    // Синхронное движение двух сервоприводов локтя
+    HCPCA9685.Servo(0, servo_joint_L_parking_pos_i);
+    HCPCA9685.Servo(1, (servo_joint_L_max_pos - servo_joint_L_parking_pos_i));
+    
+    delay(response_time);
+    Serial.println(servo_joint_L_parking_pos_i);
+    
+    // Обновляем позиции
+    servo_joint_L_parking_pos_i = servo_joint_L_parking_pos_i - servo_joint_L_pos_increment;
+    servo_joint_R_parking_pos_i = servo_joint_L_max_pos - servo_joint_L_parking_pos_i;
+  }
+}
+
+// ФУНКЦИЯ: shoulderServoForward - ОПУСКАНИЕ ПЛЕЧА (ВПЕРЕД)
+void shoulderServoForward() {
+  if (servo_joint_1_parking_pos_i < servo_joint_1_max_pos) {
+    // Управляем сервоприводом плеча (канал 2)
+    HCPCA9685.Servo(2, servo_joint_1_parking_pos_i);
+    delay(response_time);
+    Serial.println(servo_joint_1_parking_pos_i);
+    
+    // Увеличиваем позицию - плечо опускается вперед
+    servo_joint_1_parking_pos_i = servo_joint_1_parking_pos_i + servo_joint_1_pos_increment;
+  }
+}
+
+// ФУНКЦИЯ: shoulderServoBackward - ПОДНИМАНИЕ ПЛЕЧА (НАЗАД)
+void shoulderServoBackward() {
+  if (servo_joint_1_parking_pos_i > servo_joint_1_min_pos) {
+    HCPCA9685.Servo(2, servo_joint_1_parking_pos_i);
+    delay(response_time);
+    Serial.println(servo_joint_1_parking_pos_i);
+    
+    // Уменьшаем позицию - плечо поднимается назад
+    servo_joint_1_parking_pos_i = servo_joint_1_parking_pos_i - servo_joint_1_pos_increment;
+  }
+}
+
+// ============================================================================
+// ФУНКЦИИ УПРАВЛЕНИЯ ШАГОВЫМ ДВИГАТЕЛЕМ (ОСНОВАНИЕМ)
+// ============================================================================
+
+// ФУНКЦИЯ: baseRotateLeft - ВРАЩЕНИЕ ОСНОВАНИЯ ВЛЕВО (ПО ЧАСОВОЙ СТРЕЛКЕ)
+void baseRotateLeft() {
+  // Устанавливаем направление вращения - по часовой стрелке
+  digitalWrite(dirPin, HIGH);
+  
+  // Генерируем импульсы для вращения двигателя
+  // Каждый импульс - один шаг двигателя
+  for (int x = 0; x < stepsPerRevolution; x++) {
+    digitalWrite(stepPin, HIGH);      // Подаем высокий уровень
+    delayMicroseconds(stepDelay);     // Задержка определяет скорость вращения
+    digitalWrite(stepPin, LOW);       // Подаем низкий уровень
+    delayMicroseconds(stepDelay);     // Пауза между импульсами
+  }
+  
+  // Короткая задержка после завершения вращения
+  delay(response_time);
+}
+
+// ФУНКЦИЯ: baseRotateRight - ВРАЩЕНИЕ ОСНОВАНИЯ ВПРАВО (ПРОТИВ ЧАСОВОЙ СТРЕЛКИ)
+void baseRotateRight() {
+  // Устанавливаем направление вращения - против часовой стрелки
+  digitalWrite(dirPin, LOW);
+  
+  // Генерируем импульсы для вращения
+  for (int x = 0; x < stepsPerRevolution; x++) {
+    digitalWrite(stepPin, HIGH);
+    delayMicroseconds(stepDelay);
+    digitalWrite(stepPin, LOW);
+    delayMicroseconds(stepDelay);
+  }
+  
+  delay(response_time);
+}
+
+// ============================================================================
+// ДЕМОНСТРАЦИОННЫЕ ФУНКЦИИ
+// ============================================================================
+
+// ФУНКЦИЯ: wakeUp - АНИМАЦИЯ "ПРОБУЖДЕНИЯ" РОБОТА ПРИ СТАРТЕ
+void wakeUp() {
+  // Проверяем, не выполнялась ли уже эта анимация
+  if (loop_check == 0) {
+    // Анимация поднятия плеча
+    for (Pos = 0; Pos < 10; Pos++) {
+      HCPCA9685.Servo(1, Pos);
+      delay(response_time_fast);
+    }
+
+    // Анимация отведения локтя назад
+    for (Pos = 400; Pos > 390; Pos--) {
+      HCPCA9685.Servo(2, Pos);
+      delay(response_time_fast);
+    }
+
+    // Анимация наклона запястья 1 вперед
+    for (Pos = 10; Pos < 20; Pos++) {
+      HCPCA9685.Servo(3, Pos);
+      delay(response_time);
+    }
+
+    // Анимация вращения запястья 2 (туда-обратно)
+    for (Pos = 380; Pos > 50; Pos--) {
+      HCPCA9685.Servo(4, Pos);
+      delay(response_time);
+    }
+
+    for (Pos = 50; Pos < 150; Pos++) {
+      HCPCA9685.Servo(4, Pos);
+      delay(response_time);
+    }
+
+    // Анимация поднятия запястья 1
+    for (Pos = 19; Pos < 100; Pos++) {
+      HCPCA9685.Servo(3, Pos);
+      delay(response_time);
+    }
+    
+    // Сбрасываем флаг выполнения
+    loop_check = 0;
+  }
+}
+
+// ФУНКЦИЯ: flexMotors - ДЕМОНСТРАЦИОННАЯ ПОСЛЕДОВАТЕЛЬНОСТЬ ДВИЖЕНИЙ
+void flexMotors() {
+  if (loop_check == 0) {
+    delay(action_delay);
+
+    // Опускание запястья 1
+    for (Pos = 100; Pos > 10; Pos--) {
+      HCPCA9685.Servo(3, Pos);
+      delay(10);
+    }
+
+    delay(action_delay);
+
+    // Поднятие запястья 1
+    for (Pos = 10; Pos < 70; Pos++) {
+      HCPCA9685.Servo(3, Pos);
+      delay(10);
+    }
+
+    delay(action_delay);
+
+    // Вращение основания влево
+    baseRotateLeft();
+    delay(action_delay);
+
+    // Вращение запястья 2
+    for (Pos = 200; Pos < 380; Pos++) {
+      HCPCA9685.Servo(4, Pos);
+      delay(10);
+    }
+
+    delay(action_delay);
+    
+    // Устанавливаем флаг, что демо выполнено
+    loop_check = 1;
+  }
+}
